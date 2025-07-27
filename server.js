@@ -17,7 +17,6 @@ const xssClean = require('xss-clean');
 const mongoSanitize = require('express-mongo-sanitize');
 const Joi = require('joi');
 
-
 // 1. التحقق من متغيرات البيئة
 const requiredEnvs = ['PORT', 'RECAPTCHA_SECRET', 'CORS_ORIGIN', 'NODE_ENV'];
 const missingEnvs = requiredEnvs.filter(key => !process.env[key]);
@@ -30,7 +29,6 @@ const PORT = Number(process.env.PORT);
 const RECAPTCHA_SECRET = process.env.RECAPTCHA_SECRET;
 const CORS_WHITELIST = process.env.CORS_ORIGIN.split(',').map(u => u.trim());
 const NODE_ENV = process.env.NODE_ENV;
-
 
 // 2. إعداد Winston Logger مع Daily Rotate
 const transport = new winston.transports.DailyRotateFile({
@@ -45,7 +43,9 @@ const logger = winston.createLogger({
   level: NODE_ENV === 'production' ? 'info' : 'debug',
   format: winston.format.combine(
     winston.format.timestamp(),
-    winston.format.printf(i => `[${i.timestamp}] ${i.level.toUpperCase()}: ${i.message}`)
+    winston.format.printf(({ timestamp, level, message }) =>
+      `[${timestamp}] ${level.toUpperCase()}: ${message}`
+    )
   ),
   transports: [
     transport,
@@ -54,12 +54,10 @@ const logger = winston.createLogger({
   exitOnError: false
 });
 
-
 // 3. تهيئة تطبيق Express
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
-
 
 // 4. طبقات الحماية Middleware
 app.use(helmet({
@@ -99,7 +97,6 @@ app.use(express.json({ limit: '16kb' }));
 app.use(express.urlencoded({ extended: false, limit: '16kb' }));
 app.use(useragent.express());
 
-
 // 5. Rate Limiter (مع دعم Redis اختياري)
 let apiLimiter;
 if (process.env.REDIS_URL) {
@@ -123,13 +120,11 @@ if (process.env.REDIS_URL) {
 }
 app.use('/api/', apiLimiter);
 
-
 // 6. تسجيل الطلبات
 app.use((req, res, next) => {
   logger.info(`[IP: ${req.ip}] [UA: ${req.useragent.source}] ${req.method} ${req.originalUrl}`);
   next();
 });
-
 
 // 7. دوال مساعدة
 function calcDays(start, end) {
@@ -154,7 +149,6 @@ async function verifyCaptcha(token, ip) {
   }
 }
 
-
 // 8. بيانات الإجازات
 const rawLeaves = [
   { serviceCode: "GSL25021372778", idNumber: "1088576044", name: "عبدالإله سليمان عبدالله الهديلج", reportDate: "2025-02-24", startDate: "2025-02-09", endDate: "2025-02-24", doctorName: "هدى مصطفى خضر دحبور", jobTitle: "استشاري" },
@@ -167,7 +161,6 @@ const rawLeaves = [
 ];
 const leaves = rawLeaves.map(l => ({ ...l, days: calcDays(l.startDate, l.endDate) }));
 
-
 // 9. مخطط التحقق (Joi)
 const leaveSchema = Joi.object({
   serviceCode: Joi.string().alphanum().min(8).max(20).required(),
@@ -175,43 +168,38 @@ const leaveSchema = Joi.object({
   captchaToken: Joi.string().required()
 });
 
-
 // 10. المسارات (Routes)
 app.post('/api/leave', async (req, res, next) => {
   try {
-    // التحقق من المدخلات
     const { serviceCode, idNumber, captchaToken } = await leaveSchema.validateAsync(req.body);
 
-    // تحقق reCAPTCHA
     if (!(await verifyCaptcha(captchaToken, req.ip))) {
       logger.warn(`[reCAPTCHA Failed] IP: ${req.ip}`);
       return res.status(403).json({ success: false, message: 'فشل التحقق الأمني.' });
     }
 
-    // البحث في السجلات
     const record = leaves.find(l => l.serviceCode === serviceCode && l.idNumber === idNumber);
     if (!record) {
       return res.status(404).json({ success: false, message: 'لم يتم العثور على سجل.' });
     }
 
-    // إخفاء البيانات الحساسة
     const { idNumber: _, ...safeRecord } = record;
-    res.json({ success: true, record: safeRecord });
+    return res.json({ success: true, record: safeRecord });
 
   } catch (err) {
     if (err.isJoi) {
       return res.status(400).json({ success: false, message: 'البيانات المدخلة غير صحيحة.' });
     }
-    next(err);
+    return next(err);
   }
 });
 
 app.get('/api/leaves', (req, res, next) => {
   try {
-    const safe = leaves.map(({ idNumber, ...r }) => r);
-    res.json({ success: true, leaves: safe });
+    const safeLeaves = leaves.map(({ idNumber, ...rest }) => rest);
+    return res.json({ success: true, leaves: safeLeaves });
   } catch (err) {
-    next(err);
+    return next(err);
   }
 });
 
@@ -219,7 +207,6 @@ app.get('/api/leaves', (req, res, next) => {
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
-
 
 // 11. معالجة الأخطاء المركزية
 app.use((err, req, res, next) => {
@@ -231,17 +218,14 @@ app.use((err, req, res, next) => {
   });
 });
 
-
 // 12. إيقاف آمن للخادم
 process.on('SIGTERM', () => {
   logger.info('تم إيقاف الخادم بأمان.');
   server.close(() => process.exit(0));
 });
 
-
 // 13. بدء التشغيل
 const server = app.listen(PORT, () => {
   logger.info(`✅ الخادم يعمل على المنفذ ${PORT}`);
   logger.info(`⛔️ البيئة: ${NODE_ENV}`);
 });
-```[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/tphdev/secure-node-app/tree/53b43fb29ca1f4ac478f6d335a65dbca3564483b/NOTES-06-xss.md?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "1")[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/jordanhoughton74-git/personal-website/tree/03f210751d94369523b4587d8ef23a13ef1d9418/next.config.js?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "2")[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/iiroj/react-universal-boilerplate/tree/abbe014aefdc0c65019b1021a1cd4b4ecca1090a/src%2Fserver%2Fservices%2Fmiddleware.js?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "3")
