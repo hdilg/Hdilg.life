@@ -1,45 +1,67 @@
+// server.js
+
 require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const helmet = require('helmet');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
+const RedisStore = require('rate-limit-redis');
+const Redis = require('ioredis');
 const hpp = require('hpp');
 const useragent = require('express-useragent');
 const winston = require('winston');
+require('winston-daily-rotate-file');
 const axios = require('axios');
 const xssClean = require('xss-clean');
 const mongoSanitize = require('express-mongo-sanitize');
+const Joi = require('joi');
 
-const app = express();
-const PORT = process.env.PORT || 3000;
-const RECAPTCHA_SECRET = process.env.RECAPTCHA_SECRET || '';
 
-// 1. حماية طبقة النقل
-app.set('trust proxy', 1);
+// 1. التحقق من متغيرات البيئة
+const requiredEnvs = ['PORT', 'RECAPTCHA_SECRET', 'CORS_ORIGIN', 'NODE_ENV'];
+const missingEnvs = requiredEnvs.filter(key => !process.env[key]);
+if (missingEnvs.length) {
+  console.error(`❌ Missing ENV vars: ${missingEnvs.join(', ')}`);
+  process.exit(1);
+}
 
-// 2. تكوين نظام التسجيل (Logging)
+const PORT = Number(process.env.PORT);
+const RECAPTCHA_SECRET = process.env.RECAPTCHA_SECRET;
+const CORS_WHITELIST = process.env.CORS_ORIGIN.split(',').map(u => u.trim());
+const NODE_ENV = process.env.NODE_ENV;
+
+
+// 2. إعداد Winston Logger مع Daily Rotate
+const transport = new winston.transports.DailyRotateFile({
+  filename: 'logs/%DATE%-activity.log',
+  datePattern: 'YYYY-MM-DD',
+  maxSize: '10m',
+  maxFiles: '14d',
+  zippedArchive: true
+});
+
 const logger = winston.createLogger({
-  level: 'info',
+  level: NODE_ENV === 'production' ? 'info' : 'debug',
   format: winston.format.combine(
     winston.format.timestamp(),
     winston.format.printf(i => `[${i.timestamp}] ${i.level.toUpperCase()}: ${i.message}`)
   ),
   transports: [
-    new winston.transports.File({ 
-      filename: 'activity.log', 
-      maxsize: 5_000_000,
-      maxFiles: 3,
-      handleExceptions: true
-    }),
-    new winston.transports.Console({
-      handleExceptions: true
-    })
+    transport,
+    new winston.transports.Console()
   ],
   exitOnError: false
 });
 
-// 3. طبقات الحماية المتقدمة
+
+// 3. تهيئة تطبيق Express
+const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+
+
+// 4. طبقات الحماية Middleware
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
@@ -59,65 +81,82 @@ app.use(helmet({
 }));
 
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || '*',
+  origin: (origin, callback) => {
+    if (!origin || CORS_WHITELIST.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   methods: ['GET', 'POST'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 app.use(hpp());
 app.use(xssClean());
-app.use(mongoSanitize({
-  replaceWith: '_'
-}));
-
+app.use(mongoSanitize({ replaceWith: '_' }));
 app.use(express.json({ limit: '16kb' }));
 app.use(express.urlencoded({ extended: false, limit: '16kb' }));
 app.use(useragent.express());
 
-// 4. الحد من معدل الطلبات
-const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 30,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { success: false, message: 'تم تقييد طلبك مؤقتاً بسبب كثرة المحاولات.' },
-  skip: req => req.ip === '::ffff:127.0.0.1' // استثناء localhost
-});
 
+// 5. Rate Limiter (مع دعم Redis اختياري)
+let apiLimiter;
+if (process.env.REDIS_URL) {
+  const client = new Redis(process.env.REDIS_URL);
+  apiLimiter = rateLimit({
+    store: new RedisStore({ sendCommand: (...args) => client.call(...args) }),
+    windowMs: 15 * 60 * 1000,
+    max: 30,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, message: 'تم تقييد طلبك مؤقتاً بسبب كثرة المحاولات.' }
+  });
+} else {
+  apiLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 30,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, message: 'تم تقييد طلبك مؤقتاً بسبب كثرة المحاولات.' }
+  });
+}
 app.use('/api/', apiLimiter);
 
-// 5. تسجيل الطلبات
+
+// 6. تسجيل الطلبات
 app.use((req, res, next) => {
   logger.info(`[IP: ${req.ip}] [UA: ${req.useragent.source}] ${req.method} ${req.originalUrl}`);
   next();
 });
 
-// 6. تقديم الواجهة الأمامية
-app.use(express.static(path.join(__dirname, 'public'), {
-  setHeaders: (res) => {
-    res.set('X-Content-Type-Options', 'nosniff');
-    res.set('Referrer-Policy', 'same-origin');
-  }
-}));
 
-// 7. حساب مدة الإجازة
+// 7. دوال مساعدة
 function calcDays(start, end) {
+  const s = new Date(start);
+  const e = new Date(end);
+  if (isNaN(s) || isNaN(e) || e < s) return 0;
+  return Math.floor((e - s) / (1000 * 60 * 60 * 24)) + 1;
+}
+
+async function verifyCaptcha(token, ip) {
+  if (!RECAPTCHA_SECRET) return true;
   try {
-    const s = new Date(start);
-    const e = new Date(end);
-    
-    if (isNaN(s) || isNaN(e)) return 0;
-    if (e < s) return 0;
-    
-    return Math.floor((e - s) / (1000 * 60 * 60 * 24)) + 1;
-  } catch (error) {
-    logger.error(`خطأ في حساب الأيام: ${error.message}`);
-    return 0;
+    const { data } = await axios.post(
+      'https://www.google.com/recaptcha/api/siteverify',
+      new URLSearchParams({ secret: RECAPTCHA_SECRET, response: token, remoteip: ip }),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 5000 }
+    );
+    return data.success && data.score >= 0.5;
+  } catch (err) {
+    logger.error(`[reCAPTCHA Error] ${err.message}`);
+    return false;
   }
 }
 
-// 8. بيانات الإجازات (مع حماية ضد التعديل)
-const leaves = Object.freeze([
+
+// 8. بيانات الإجازات
+const rawLeaves = [
   { serviceCode: "GSL25021372778", idNumber: "1088576044", name: "عبدالإله سليمان عبدالله الهديلج", reportDate: "2025-02-24", startDate: "2025-02-09", endDate: "2025-02-24", doctorName: "هدى مصطفى خضر دحبور", jobTitle: "استشاري" },
   { serviceCode: "GSL25021898579", idNumber: "1088576044", name: "عبدالإله سليمان عبدالله الهديلج", reportDate: "2025-03-26", startDate: "2025-02-25", endDate: "2025-03-26", doctorName: "جمال راشد السر محمد احمد", jobTitle: "استشاري" },
   { serviceCode: "GSL25022385036", idNumber: "1088576044", name: "عبدالإله سليمان عبدالله الهديلج", reportDate: "2025-04-17", startDate: "2025-03-27", endDate: "2025-04-17", doctorName: "جمال راشد السر محمد احمد", jobTitle: "استشاري" },
@@ -125,116 +164,84 @@ const leaves = Object.freeze([
   { serviceCode: "GSL25023345012", idNumber: "1088576044", name: "عبدالإله سليمان عبدالله الهديلج", reportDate: "2025-06-12", startDate: "2025-05-16", endDate: "2025-06-12", doctorName: "هدى مصطفى خضر دحبور", jobTitle: "استشاري" },
   { serviceCode: "GSL25062955824", idNumber: "1088576044", name: "عبدالإله سليمان عبدالله الهديلج", reportDate: "2025-07-11", startDate: "2025-06-13", endDate: "2025-07-11", doctorName: "هدى مصطفى خضر دحبور", jobTitle: "استشاري" },
   { serviceCode: "GSL25071678945", idNumber: "1088576044", name: "عبدالإله سليمان عبدالله الهديلج", reportDate: "2025-07-12", startDate: "2025-07-12", endDate: "2025-07-25", doctorName: "عبدالعزيز فهد هميجان الروقي", jobTitle: "استشاري" }
-].map(l => ({ ...l, days: calcDays(l.startDate, l.endDate) })));
+];
+const leaves = rawLeaves.map(l => ({ ...l, days: calcDays(l.startDate, l.endDate) }));
 
-// 9. التحقق من reCAPTCHA
-async function verifyCaptcha(token, ip) {
-  if (!RECAPTCHA_SECRET) return true;
-  
+
+// 9. مخطط التحقق (Joi)
+const leaveSchema = Joi.object({
+  serviceCode: Joi.string().alphanum().min(8).max(20).required(),
+  idNumber: Joi.string().pattern(/^[0-9]{10}$/).required(),
+  captchaToken: Joi.string().required()
+});
+
+
+// 10. المسارات (Routes)
+app.post('/api/leave', async (req, res, next) => {
   try {
-    const response = await axios.post(
-      'https://www.google.com/recaptcha/api/siteverify',
-      new URLSearchParams({ secret: RECAPTCHA_SECRET, response: token, remoteip: ip }),
-      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 5000 }
-    );
-    
-    return response.data.success && response.data.score >= 0.5;
-  } catch (err) {
-    logger.error(`[reCAPTCHA Error] ${err.message}`);
-    return false;
-  }
-}
+    // التحقق من المدخلات
+    const { serviceCode, idNumber, captchaToken } = await leaveSchema.validateAsync(req.body);
 
-// 10. مسار البحث عن إجازة
-app.post('/api/leave', async (req, res) => {
-  try {
-    const { serviceCode, idNumber, captchaToken } = req.body;
-
-    // تحقق من صحة المدخلات
-    if (typeof serviceCode !== 'string' || !/^[A-Za-z0-9]{8,20}$/.test(serviceCode) ||
-        typeof idNumber !== 'string' || !/^[0-9]{10}$/.test(idNumber)) {
-      return res.status(400).json({ success: false, message: 'البيانات المدخلة غير صحيحة.' });
-    }
-
-    // التحقق من reCAPTCHA
+    // تحقق reCAPTCHA
     if (!(await verifyCaptcha(captchaToken, req.ip))) {
       logger.warn(`[reCAPTCHA Failed] IP: ${req.ip}`);
-      return res.status(403).json({ 
-        success: false, 
-        message: 'فشل التحقق الأمني. يرجى المحاولة مرة أخرى.' 
-      });
+      return res.status(403).json({ success: false, message: 'فشل التحقق الأمني.' });
     }
 
     // البحث في السجلات
-    const record = leaves.find(l => 
-      l.serviceCode === serviceCode && 
-      l.idNumber === idNumber
-    );
-
+    const record = leaves.find(l => l.serviceCode === serviceCode && l.idNumber === idNumber);
     if (!record) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'لم يتم العثور على سجل مطابق.' 
-      });
+      return res.status(404).json({ success: false, message: 'لم يتم العثور على سجل.' });
     }
 
-    // إرجاع النتيجة مع حذف البيانات الحساسة
+    // إخفاء البيانات الحساسة
     const { idNumber: _, ...safeRecord } = record;
-    return res.json({ success: true, record: safeRecord });
-    
-  } catch (error) {
-    logger.error(`خطأ في معالجة الطلب: ${error.message}`);
-    res.status(500).json({ 
-      success: false, 
-      message: 'حدث خطأ داخلي في الخادم.' 
-    });
-  }
-});
+    res.json({ success: true, record: safeRecord });
 
-// 11. مسار الحصول على جميع الإجازات
-app.get('/api/leaves', (req, res) => {
-  try {
-    // حماية ضد كشف البيانات الحساسة
-    const safeLeaves = leaves.map(({ idNumber, ...rest }) => rest);
-    res.json({ success: true, leaves: safeLeaves });
-  } catch (error) {
-    logger.error(`خطأ في /api/leaves: ${error.message}`);
-    res.status(500).json({ 
-      success: false, 
-      message: 'حدث خطأ أثناء جلب البيانات.' 
-    });
-  }
-});
-
-// 12. SPA fallback
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'), (err) => {
-    if (err) {
-      logger.error(`خطأ في تحميل الواجهة: ${err.message}`);
-      res.status(404).json({ success: false, message: 'الصفحة المطلوبة غير موجودة.' });
+  } catch (err) {
+    if (err.isJoi) {
+      return res.status(400).json({ success: false, message: 'البيانات المدخلة غير صحيحة.' });
     }
-  });
+    next(err);
+  }
 });
 
-// 13. معالجة الأخطاء العامة
+app.get('/api/leaves', (req, res, next) => {
+  try {
+    const safe = leaves.map(({ idNumber, ...r }) => r);
+    res.json({ success: true, leaves: safe });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// SPA fallback
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+
+// 11. معالجة الأخطاء المركزية
 app.use((err, req, res, next) => {
-  logger.error(`خطأ غير معالج: ${err.message}`);
-  res.status(500).json({ 
-    success: false, 
-    message: 'حدث عطل تقني غير متوقع. يرجى المحاولة لاحقاً.' 
+  logger.error(err.stack);
+  if (res.headersSent) return next(err);
+  res.status(err.statusCode || 500).json({
+    success: false,
+    message: err.isOperational ? err.message : 'حدث عطل تقني، يرجى المحاولة لاحقاً.'
   });
 });
 
-// 14. إيقاف آمن للخادم
+
+// 12. إيقاف آمن للخادم
 process.on('SIGTERM', () => {
-  logger.info('تم إيقاف الخدمة بأمان.');
-  server.close(() => {
-    process.exit(0);
-  });
+  logger.info('تم إيقاف الخادم بأمان.');
+  server.close(() => process.exit(0));
 });
 
-// 15. بدء التشغيل
+
+// 13. بدء التشغيل
 const server = app.listen(PORT, () => {
   logger.info(`✅ الخادم يعمل على المنفذ ${PORT}`);
-  logger.info(`⛔️ وضع الحماية: ${process.env.NODE_ENV === 'production' ? 'تشديد كامل' : 'تطوير'}`);
+  logger.info(`⛔️ البيئة: ${NODE_ENV}`);
 });
+```[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/tphdev/secure-node-app/tree/53b43fb29ca1f4ac478f6d335a65dbca3564483b/NOTES-06-xss.md?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "1")[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/jordanhoughton74-git/personal-website/tree/03f210751d94369523b4587d8ef23a13ef1d9418/next.config.js?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "2")[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/iiroj/react-universal-boilerplate/tree/abbe014aefdc0c65019b1021a1cd4b4ecca1090a/src%2Fserver%2Fservices%2Fmiddleware.js?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "3")
