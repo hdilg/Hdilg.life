@@ -1,4 +1,4 @@
-// server.js — منصة إدارة إجازات "عبدالإله سليمان عبدالله الهديلج"
+// server.js — Back-end Express لمنصة إدارة الإجازات
 
 require('dotenv').config();
 const express       = require('express');
@@ -69,10 +69,10 @@ app.use((req, res, next) => {
   next();
 });
 
-// Serve static UI (index.html, CSS, JS, images…)
+// Serve static UI
 app.use(express.static(path.join(__dirname, 'public')));
 
-// حساب عدد الأيام شاملة اليومين
+// حساب عدد الأيام (شاملة اليومين)
 function calcDays(start, end) {
   const s = new Date(start);
   const e = new Date(end);
@@ -91,21 +91,20 @@ const leaves = [
   { serviceCode: "GSL25071678945", idNumber: "1088576044", name: "عبدالإله سليمان عبدالله الهديلج", reportDate: "2025-07-12", startDate: "2025-07-12", endDate: "2025-07-25", doctorName: "عبدالعزيز فهد هميجان الروقي", jobTitle: "استشاري" }
 ].map(l => ({ ...l, days: calcDays(l.startDate, l.endDate) }));
 
-// POST /api/leave — استعلام بإجازة واحدة
+// POST /api/leave — استعلام سجل واحد
 app.post('/api/leave', async (req, res) => {
   const { serviceCode, idNumber, captchaToken } = req.body;
 
-  // تحقق بسيط من المدخلات
-  if (
-    typeof serviceCode !== 'string' ||
-    !/^[A-Za-z0-9]{8,20}$/.test(serviceCode) ||
-    typeof idNumber   !== 'string' ||
-    !/^[0-9]{10}$/.test(idNumber)
+  // تحقق من المدخلات
+  if (typeof serviceCode !== 'string' ||
+      !/^[A-Za-z0-9]{8,20}$/.test(serviceCode) ||
+      typeof idNumber   !== 'string' ||
+      !/^[0-9]{10}$/.test(idNumber)
   ) {
     return res.status(400).json({ success: false, message: 'البيانات غير صحيحة.' });
   }
 
-  // تحقق اختياري من reCAPTCHA
+  // تحقق اختياري reCAPTCHA
   if (RECAPTCHA_SECRET && captchaToken) {
     try {
       const response = await axios.post(
@@ -132,7 +131,7 @@ app.post('/api/leave', async (req, res) => {
   return res.status(404).json({ success: false, message: 'لا يوجد سجل مطابق.' });
 });
 
-// GET /api/leaves — قائمة جميع الإجازات
+// GET /api/leaves — إرجاع كل السجلات
 app.get('/api/leaves', (req, res) => {
   res.json({ success: true, leaves });
 });
@@ -142,11 +141,12 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// Graceful shutdown & 404
+// 404 handler
 app.use((req, res) => {
   res.status(404).json({ success: false, message: 'الصفحة غير موجودة.' });
 });
 
+// Graceful shutdown
 process.on('SIGTERM', () => {
   logger.info('تم إيقاف الخدمة بأمان.');
   process.exit(0);
@@ -154,5 +154,5 @@ process.on('SIGTERM', () => {
 
 // Start server
 app.listen(PORT, () => {
-  logger.info(`✅ SickLV API تعمل على المنفذ ${PORT}`);
+  logger.info(`✅ الخادم يعمل على المنفذ ${PORT}`);
 });
