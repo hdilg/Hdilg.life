@@ -1,7 +1,7 @@
 {
   "name": "sicklv-backend",
   "version": "1.0.0",
-  "description": "منصة إدارة الإجازات الطبية (Back-end)",
+  "description": "منصة إدارة الإجازات الطبية – Back-end",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -17,7 +17,11 @@
     "express-useragent": "^1.0.15",
     "helmet": "^6.0.1",
     "hpp": "^0.2.3",
+    "ioredis": "^5.3.0",
+    "joi": "^17.7.1",
+    "rate-limit-redis": "^2.1.0",
     "winston": "^3.8.2",
+    "winston-daily-rotate-file": "^4.7.1",
     "xss-clean": "^0.1.1"
   },
   "devDependencies": {
