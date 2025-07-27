@@ -1,4 +1,36 @@
+# Node.js dependencies
 /node_modules/
-/logs/
-/.env
+
+# البيئة والبيانات السرية
+.env
+.env.local
+.env.*.local
+
+# ملفات السجل
+*.log
+activity.log
+
+# ملفات النظام المؤقتة
 .DS_Store
+Thumbs.db
+
+# ملفات IDE مثل VS Code
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# ملفات التشغيل المؤقتة
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# الإنتاج إذا بنيت واجهة مستقلة
+/dist/
+build/
+
+# تغطية الاختبارات (لو أضفت لاحقًا)
+coverage/
+
+# ملفات عامة ما تستخدم في الكود
+/public/uploads/
