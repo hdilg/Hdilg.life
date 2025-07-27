@@ -1,3 +1,4 @@
-node_modules/
-.env
-activity.log
+/node_modules/
+/logs/
+/.env
+.DS_Store
