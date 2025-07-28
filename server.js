@@ -1,4 +1,5 @@
-// server.js — منصة إدارة إجازات "عبدالإله سليمان عبدالله الهديلج"
+
+// server.js — منصة إدارة الإجازات المرضية
 
 const express       = require('express');
 const helmet        = require('helmet');
@@ -18,7 +19,7 @@ const RECAPTCHA_SECRET = process.env.RECAPTCHA_SECRET || '';
 
 app.set('trust proxy', 1);
 
-// Logger setup
+// Logger
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
@@ -31,22 +32,8 @@ const logger = winston.createLogger({
   ]
 });
 
-// Security middlewares
+// Middleware
 app.use(helmet());
-app.use(helmet.hsts({ maxAge: 31536000, preload: true }));
-app.use(helmet.contentSecurityPolicy({
-  directives: {
-    defaultSrc: ["'self'"],
-    scriptSrc:  ["'self'", "https://www.google.com", "https://www.gstatic.com"],
-    styleSrc:   ["'self'", "'unsafe-inline'"],
-    imgSrc:     ["'self'", "data:"],
-    objectSrc:  ["'none'"],
-    frameAncestors: ["'none'"],
-    baseUri:    ["'self'"],
-    formAction: ["'self'"],
-    upgradeInsecureRequests: []
-  }
-}));
 app.use(cors());
 app.use(hpp());
 app.use(xssClean());
@@ -54,24 +41,25 @@ app.use(mongoSanitize());
 app.use(express.json({ limit: '16kb' }));
 app.use(useragent.express());
 
+// Rate Limiter
 app.use(rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 30,
+  max: 40,
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, message: 'تم تقييد طلبك مؤقتاً.' }
 }));
 
-// Request logging
+// Logging Request
 app.use((req, res, next) => {
-  logger.info(`[IP: ${req.ip}] [UA: ${req.useragent.source}] ${req.method} ${req.originalUrl}`);
+  logger.info(`[${req.ip}] ${req.method} ${req.url}`);
   next();
 });
 
-// Serve static UI
+// Serve frontend
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Calculate inclusive days between two dates
+// بيانات الإجازات
 function calcDays(start, end) {
   const s = new Date(start);
   const e = new Date(end);
@@ -79,7 +67,6 @@ function calcDays(start, end) {
   return Math.floor((e - s) / (1000 * 60 * 60 * 24)) + 1;
 }
 
-// Updated leave records
 const leaves = [
   { serviceCode: "GSL25021372778", idNumber: "1088576044", name: "عبدالإله سليمان عبدالله الهديلج", reportDate: "2025-02-24", startDate: "2025-02-09", endDate: "2025-02-24", doctorName: "هدى مصطفى خضر دحبور", jobTitle: "استشاري" },
   { serviceCode: "GSL25021898579", idNumber: "1088576044", name: "عبدالإله سليمان عبدالله الهديلج", reportDate: "2025-03-26", startDate: "2025-02-25", endDate: "2025-03-26", doctorName: "جمال راشد السر محمد احمد", jobTitle: "استشاري" },
@@ -87,67 +74,41 @@ const leaves = [
   { serviceCode: "GSL25022884602", idNumber: "1088576044", name: "عبدالإله سليمان عبدالله الهديلج", reportDate: "2025-04-18", startDate: "2025-04-18", endDate: "2025-05-15", doctorName: "هدى مصطفى خضر دحبور", jobTitle: "استشاري" },
   { serviceCode: "GSL25023345012", idNumber: "1088576044", name: "عبدالإله سليمان عبدالله الهديلج", reportDate: "2025-05-16", startDate: "2025-05-16", endDate: "2025-06-12", doctorName: "هدى مصطفى خضر دحبور", jobTitle: "استشاري" },
   { serviceCode: "GSL25062955824", idNumber: "1088576044", name: "عبدالإله سليمان عبدالله الهديلج", reportDate: "2025-06-13", startDate: "2025-06-13", endDate: "2025-07-11", doctorName: "هدى مصطفى خضر دبحور", jobTitle: "استشاري" },
-  { serviceCode: "GSL25071678945", idNumber: "1088576044", name: "عبدالإله سليمان عبدالله الهديلج", reportDate: "2025-07-12", startDate: "2025-07-12", endDate: "2025-07-25", doctorName: "عبدالعزيز فهد هميجان الروقي", jobTitle: "استشاري" }
+  { serviceCode: "GSL25071678945", idNumber: "1088576044", name: "عبدالإله سليمان عبدالله الهديلج", reportDate: "2025-07-12", startDate: "2025-07-12", endDate: "2025-07-25", doctorName: "عبدالعزيز فهد الروقي", jobTitle: "استشاري" }
 ].map(l => ({ ...l, days: calcDays(l.startDate, l.endDate) }));
 
-// POST /api/leave
-app.post('/api/leave', async (req, res) => {
-  const { serviceCode, idNumber, captchaToken } = req.body;
+// API - GET all
+app.get('/api/leaves', (req, res) => {
+  res.json({ success: true, leaves });
+});
 
-  // Input validation
+// API - POST فردي
+app.post('/api/leave', async (req, res) => {
+  const { serviceCode, idNumber } = req.body;
+
   if (
     typeof serviceCode !== 'string' ||
     !/^[A-Za-z0-9]{8,20}$/.test(serviceCode) ||
-    typeof idNumber   !== 'string' ||
+    typeof idNumber !== 'string' ||
     !/^[0-9]{10}$/.test(idNumber)
   ) {
     return res.status(400).json({ success: false, message: 'البيانات غير صحيحة.' });
   }
 
-  // Optional reCAPTCHA check
-  if (RECAPTCHA_SECRET && captchaToken) {
-    try {
-      const response = await axios.post(
-        'https://www.google.com/recaptcha/api/siteverify',
-        new URLSearchParams({ secret: RECAPTCHA_SECRET, response: captchaToken }).toString(),
-        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-      );
-      if (!response.data.success || (response.data.score !== undefined && response.data.score < 0.5)) {
-        logger.warn(`[reCAPTCHA Failed] IP: ${req.ip}`);
-        return res.status(403).json({ success: false, message: 'فشل التحقق الأمني.' });
-      }
-    } catch (err) {
-      logger.error(`[reCAPTCHA Error] ${err.message}`);
-      return res.status(500).json({ success: false, message: 'خطأ أثناء التحقق الأمني.' });
-    }
-  }
-
-  // Find matching record
   const record = leaves.find(l => l.serviceCode === serviceCode && l.idNumber === idNumber);
   if (record) {
     return res.json({ success: true, record });
   }
 
-  return res.status(404).json({ success: false, message: 'لا يوجد سجل مطابق.' });
-});
-
-// GET /api/leaves
-app.get('/api/leaves', (req, res) => {
-  res.json({ success: true, leaves });
+  res.status(404).json({ success: false, message: 'لا يوجد سجل مطابق.' });
 });
 
 // 404 handler
 app.use((req, res) => {
-  res.status(404).json({ success: false, message: 'الصفحة غير موجودة.' });
+  res.status(404).json({ success: false, message: "الصفحة غير موجودة." });
 });
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  logger.info('تم إيقاف الخدمة بأمان.');
-  process.exit(0);
-});
-
-// Start server
+// تشغيل السيرفر
 app.listen(PORT, () => {
-  logger.info(`✅ SickLV API تعمل على المنفذ ${PORT}`);
+  logger.info(`✅ Server running on port ${PORT}`);
 });
